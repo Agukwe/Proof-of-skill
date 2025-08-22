@@ -405,3 +405,305 @@
     u0
   )
 )
+
+;; ===== JOB POSTING AND MATCHING SYSTEM =====
+
+;; Job posting data structure
+(define-map job-postings
+  { job-id: uint }
+  {
+    employer: principal,
+    title: (string-ascii 100),
+    description: (string-utf8 1000),
+    required-skills: (list 10 (string-ascii 100)),
+    skill-categories: (list 5 uint),
+    min-reputation: uint,
+    max-budget: uint,
+    deadline: uint,
+    is-active: bool,
+    created-at: uint,
+    applications: uint
+  }
+)
+
+;; Job applications
+(define-map job-applications
+  { job-id: uint, applicant: principal }
+  {
+    cover-letter: (string-utf8 500),
+    proposed-budget: uint,
+    estimated-completion: uint,
+    applied-at: uint,
+    status: (string-ascii 20) ;; "pending", "accepted", "rejected"
+  }
+)
+
+(define-data-var next-job-id uint u1)
+
+;; Post a new job
+(define-public (post-job
+  (title (string-ascii 100))
+  (description (string-utf8 1000))
+  (required-skills (list 10 (string-ascii 100)))
+  (required-categories (list 5 uint))
+  (min-reputation uint)
+  (max-budget uint)
+  (deadline uint))
+  (let ((employer tx-sender)
+        (job-id (var-get next-job-id)))
+    
+    ;; Validate inputs
+    (asserts! (> (len title) u0) ERR-INVALID-INPUT)
+    (asserts! (> (len description) u0) ERR-INVALID-INPUT)
+    (asserts! (> (len required-skills) u0) ERR-INVALID-INPUT)
+    (asserts! (> deadline block-height) ERR-INVALID-INPUT)
+    (asserts! (> max-budget u0) ERR-INVALID-INPUT)
+    
+    ;; Create job posting
+    (map-set job-postings {job-id: job-id} {
+      employer: employer,
+      title: title,
+      description: description,
+      required-skills: required-skills,
+      skill-categories: required-categories,
+      min-reputation: min-reputation,
+      max-budget: max-budget,
+      deadline: deadline,
+      is-active: true,
+      created-at: block-height,
+      applications: u0
+    })
+    
+    (var-set next-job-id (+ job-id u1))
+    (print {action: "job-posted", job-id: job-id, employer: employer, title: title})
+    (ok job-id)
+  )
+)
+
+;; Apply for a job
+(define-public (apply-for-job
+  (job-id uint)
+  (cover-letter (string-utf8 500))
+  (proposed-budget uint)
+  (estimated-completion uint))
+  (let ((applicant tx-sender))
+    
+    ;; Validate job exists and is active
+    (match (map-get? job-postings {job-id: job-id})
+      job (begin
+        (asserts! (get is-active job) ERR-SKILL-NOT-FOUND)
+        (asserts! (> (get deadline job) block-height) ERR-INVALID-INPUT)
+        (asserts! (not (is-eq applicant (get employer job))) ERR-UNAUTHORIZED)
+        
+        ;; Check if applicant meets minimum reputation
+        (asserts! (match (map-get? user-profiles {user: applicant})
+          profile (>= (get reputation-score profile) (get min-reputation job))
+          false
+        ) ERR-UNAUTHORIZED)
+        
+        ;; Check if already applied
+        (asserts! (is-none (map-get? job-applications {job-id: job-id, applicant: applicant})) ERR-ALREADY-VERIFIED)
+        
+        ;; Create application
+        (map-set job-applications {job-id: job-id, applicant: applicant} {
+          cover-letter: cover-letter,
+          proposed-budget: proposed-budget,
+          estimated-completion: estimated-completion,
+          applied-at: block-height,
+          status: "pending"
+        })
+        
+        ;; Update application count
+        (map-set job-postings {job-id: job-id} (merge job {
+          applications: (+ (get applications job) u1)
+        }))
+        
+        (print {action: "job-application", job-id: job-id, applicant: applicant})
+        (ok true)
+      )
+      ERR-SKILL-NOT-FOUND
+    )
+  )
+)
+
+;; Accept/reject job application (employer only)
+(define-public (update-application-status (job-id uint) (applicant principal) (status (string-ascii 20)))
+  (match (map-get? job-postings {job-id: job-id})
+    job (begin
+      (asserts! (is-eq tx-sender (get employer job)) ERR-UNAUTHORIZED)
+      (asserts! (or (is-eq status "accepted") (is-eq status "rejected")) ERR-INVALID-INPUT)
+      
+      (match (map-get? job-applications {job-id: job-id, applicant: applicant})
+        application (begin
+          (map-set job-applications {job-id: job-id, applicant: applicant}
+            (merge application {status: status}))
+          
+          ;; If accepted, mark job as inactive
+          (if (is-eq status "accepted")
+            (map-set job-postings {job-id: job-id} (merge job {is-active: false}))
+            true
+          )
+          
+          (print {action: "application-updated", job-id: job-id, applicant: applicant, status: status})
+          (ok true)
+        )
+        ERR-SKILL-NOT-FOUND
+      )
+    )
+    ERR-SKILL-NOT-FOUND
+  )
+)
+
+;; ===== ADVANCED MARKETPLACE FEATURES =====
+
+;; Skill endorsement system
+(define-map skill-endorsements
+  { endorser: principal, user: principal, skill-name: (string-ascii 100) }
+  {
+    endorsed-at: uint,
+    comment: (optional (string-utf8 200))
+  }
+)
+
+;; Endorse a user's skill
+(define-public (endorse-user-skill
+  (user principal)
+  (skill-name (string-ascii 100))
+  (comment (optional (string-utf8 200))))
+  (let ((endorser tx-sender))
+    (asserts! (not (is-eq endorser user)) ERR-UNAUTHORIZED)
+    (asserts! (> (len skill-name) u0) ERR-INVALID-INPUT)
+    
+    ;; Check if endorser has profile and reputation
+    (asserts! (match (map-get? user-profiles {user: endorser})
+      profile (> (get reputation-score profile) u100)
+      false
+    ) ERR-UNAUTHORIZED)
+    
+    (map-set skill-endorsements {endorser: endorser, user: user, skill-name: skill-name} {
+      endorsed-at: block-height,
+      comment: comment
+    })
+    
+    (print {action: "skill-endorsed", endorser: endorser, user: user, skill: skill-name})
+    (ok true)
+  )
+)
+
+;; Dispute system for verification issues
+(define-map verification-disputes
+  { dispute-id: uint }
+  {
+    disputer: principal,
+    target-user: principal,
+    skill-id: uint,
+    reason: (string-utf8 300),
+    status: (string-ascii 20), ;; "pending", "resolved", "dismissed"
+    created-at: uint,
+    resolved-by: (optional principal),
+    resolution: (optional (string-utf8 300))
+  }
+)
+
+(define-data-var next-dispute-id uint u1)
+
+;; File a dispute against a skill verification
+(define-public (file-verification-dispute
+  (target-user principal)
+  (skill-id uint)
+  (reason (string-utf8 300)))
+  (let ((disputer tx-sender)
+        (dispute-id (var-get next-dispute-id)))
+    
+    (asserts! (> (len reason) u0) ERR-INVALID-INPUT)
+    (asserts! (not (is-eq disputer target-user)) ERR-UNAUTHORIZED)
+    
+    ;; Check if verification exists
+    (asserts! (is-some (map-get? skill-verifications {user: target-user, skill-id: skill-id})) ERR-SKILL-NOT-FOUND)
+    
+    (map-set verification-disputes {dispute-id: dispute-id} {
+      disputer: disputer,
+      target-user: target-user,
+      skill-id: skill-id,
+      reason: reason,
+      status: "pending",
+      created-at: block-height,
+      resolved-by: none,
+      resolution: none
+    })
+    
+    (var-set next-dispute-id (+ dispute-id u1))
+    (print {action: "dispute-filed", dispute-id: dispute-id, target: target-user})
+    (ok dispute-id)
+  )
+)
+
+;; Resolve dispute (contract owner only)
+(define-public (resolve-dispute
+  (dispute-id uint)
+  (resolution (string-utf8 300))
+  (uphold-dispute bool))
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT-OWNER) ERR-UNAUTHORIZED)
+    
+    (match (map-get? verification-disputes {dispute-id: dispute-id})
+      dispute (begin
+        (asserts! (is-eq (get status dispute) "pending") ERR-INVALID-INPUT)
+        
+        (map-set verification-disputes {dispute-id: dispute-id} (merge dispute {
+          status: "resolved",
+          resolved-by: (some tx-sender),
+          resolution: (some resolution)
+        }))
+        
+        ;; If dispute is upheld, revoke the verification
+        (if uphold-dispute
+          (map-set skill-verifications 
+            {user: (get target-user dispute), skill-id: (get skill-id dispute)}
+            (merge (unwrap-panic (map-get? skill-verifications 
+              {user: (get target-user dispute), skill-id: (get skill-id dispute)}))
+              {is-active: false}))
+          true
+        )
+        
+        (print {action: "dispute-resolved", dispute-id: dispute-id, upheld: uphold-dispute})
+        (ok true)
+      )
+      ERR-SKILL-NOT-FOUND
+    )
+  )
+)
+
+;; ===== FINAL READ-ONLY QUERY FUNCTIONS =====
+
+;; Get job posting details
+(define-read-only (get-job-posting (job-id uint))
+  (map-get? job-postings {job-id: job-id})
+)
+
+;; Get job application details  
+(define-read-only (get-job-application (job-id uint) (applicant principal))
+  (map-get? job-applications {job-id: job-id, applicant: applicant})
+)
+
+;; Get skill endorsement
+(define-read-only (get-skill-endorsement (endorser principal) (user principal) (skill-name (string-ascii 100)))
+  (map-get? skill-endorsements {endorser: endorser, user: user, skill-name: skill-name})
+)
+
+;; Get dispute details
+(define-read-only (get-dispute (dispute-id uint))
+  (map-get? verification-disputes {dispute-id: dispute-id})
+)
+
+;; Get comprehensive marketplace statistics
+(define-read-only (get-marketplace-stats)
+  {
+    total-users: (var-get total-users),
+    total-verifications: (var-get total-verifications),
+    total-categories: (- (var-get next-category-id) u1),
+    total-skills: (- (var-get next-skill-id) u1),
+    total-jobs: (- (var-get next-job-id) u1),
+    total-disputes: (- (var-get next-dispute-id) u1)
+  }
+)
