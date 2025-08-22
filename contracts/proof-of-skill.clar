@@ -1,118 +1,74 @@
+;; ProofOfSkill Contract
+;; A job marketplace contract that stores skill verifications from trusted sources
+;; for freelance matching and credential management.
 
-;; proof-of-skill.clar
-;; Job marketplace that stores skill verifications from trusted sources for freelance matching.
-;; Clarinet-compliant. Clarity v2.
+;; Error codes
+(define-constant ERR-UNAUTHORIZED (err u100))
+(define-constant ERR-SKILL-NOT-FOUND (err u101))
+(define-constant ERR-INVALID-VERIFIER (err u102))
+(define-constant ERR-ALREADY-VERIFIED (err u103))
+(define-constant ERR-INVALID-SCORE (err u104))
+(define-constant ERR-PROFILE-NOT-FOUND (err u105))
+(define-constant ERR-INVALID-INPUT (err u106))
 
-(impl-trait .skill-verifier-trait.skill-verifier-trait)
+;; Contract owner
+(define-constant CONTRACT-OWNER tx-sender)
 
-;; =====================
-;; Constants & Errors
-;; =====================
-
-(define-constant ERR-UNAUTHORIZED u1001)
-(define-constant ERR-NOT-FOUND u1002)
-(define-constant ERR-ALREADY-EXISTS u1003)
-(define-constant ERR-INVALID-INPUT u1004)
-(define-constant ERR-NOT-TRUSTED u1005)
-(define-constant ERR-NOT-OWNER u1006)
-(define-constant ERR-NOT-CLIENT u1007)
-(define-constant ERR-CLOSED u1008)
-(define-constant ERR-NOT-QUALIFIED u1009)
-
-(define-data-var contract-owner principal tx-sender)
-
-;; =====================
-;; Trusted verifier registry
-;; =====================
-;; Both individual principals and verifier contracts can be trusted.
-
-(define-map trusted-verifiers
-  { verifier: principal }
-  { active: bool })
-
-(define-read-only (is-trusted-verifier (v principal))
-  (default-to false (get active (map-get? trusted-verifiers { verifier: v }))))
-
-(define-public (register-trusted-verifier (v principal))
-  (begin
-    (asserts! (is-eq tx-sender (var-get contract-owner)) (err ERR-NOT-OWNER))
-    (match (map-get? trusted-verifiers { verifier: v })
-      some-existing (begin
-        (map-set trusted-verifiers { verifier: v } { active: true })
-        (ok true))
-      none (begin
-        (map-insert trusted-verifiers { verifier: v } { active: true })
-        (ok true))))
+;; Data structures
+(define-map user-profiles
+  { user: principal }
+  {
+    username: (string-ascii 50),
+    bio: (string-utf8 500),
+    portfolio-url: (optional (string-ascii 200)),
+    reputation-score: uint,
+    total-verifications: uint,
+    created-at: uint
+  }
 )
 
-(define-public (unregister-trusted-verifier (v principal))
-  (begin
-    (asserts! (is-eq tx-sender (var-get contract-owner)) (err ERR-NOT-OWNER))
-    (map-set trusted-verifiers { verifier: v } { active: false })
-    (ok true)))
+(define-map skill-categories
+  { category-id: uint }
+  {
+    name: (string-ascii 50),
+    description: (string-utf8 200),
+    is-active: bool,
+    created-by: principal,
+    created-at: uint
+  }
+)
 
-;; =====================
-;; Skill storage
-;; =====================
-;; Keyed by (user, skill). Stores verifier, evidence, time, and active flag.
+(define-map skill-verifications
+  { user: principal, skill-id: uint }
+  {
+    skill-name: (string-ascii 100),
+    category-id: uint,
+    verifier: principal,
+    verification-type: (string-ascii 50),
+    score: uint,
+    evidence-url: (optional (string-ascii 300)),
+    verified-at: uint,
+    expires-at: (optional uint),
+    is-active: bool
+  }
+)
 
-(define-map skills
-  { user: principal, skill: (string-ascii 64) }
-  { verified: bool, verifier: principal, evidence: (optional (string-ascii 64)), timestamp: uint })
+;; Trusted verifiers management
+(define-map trusted-verifiers
+  { verifier: principal }
+  {
+    name: (string-ascii 100),
+    verification-types: (list 10 (string-ascii 50)),
+    reputation: uint,
+    total-verifications: uint,
+    is-active: bool,
+    added-by: principal,
+    added-at: uint
+  }
+)
 
-;; Per-user skill index to allow basic enumeration by index.
-(define-map user-skill-counts { user: principal } { count: uint })
-(define-map skills-by-user
-  { user: principal, idx: uint }
-  { skill: (string-ascii 64) })
-
-(define-read-only (get-skill (user principal) (skill (string-ascii 64)))
-  (map-get? skills { user: user, skill: skill }))
-
-(define-read-only (get-user-skill-count (user principal))
-  (default-to u0 (get count (map-get? user-skill-counts { user: user }))))
-
-(define-read-only (get-skill-by-index (user principal) (idx uint))
-  (map-get? skills-by-user { user: user, idx: idx }))
-
-;; Internal helper to index a skill if first time seen for user
-(define-private (index-skill-if-new (user principal) (skill (string-ascii 64)))
-  (let ((existing (map-get? skills { user: user, skill: skill })))
-    (if (is-some existing)
-        false
-        (let ((count (default-to u0 (get count (map-get? user-skill-counts { user: user })))))
-          (begin
-            (map-set skills-by-user { user: user, idx: count } { skill: skill })
-            (map-set user-skill-counts { user: user } { count: (+ count u1) })
-            true)))))
-
-;; =====================
-;; Event helpers
-;; =====================
-(define-private (emit (what (string-ascii 32)) (payload (string-ascii 200)))
-  (print { event: what, msg: payload }))
-
-;; =====================
-;; Owner controls
-;; =====================
-(define-public (transfer-ownership (new-owner principal))
-  (begin
-    (asserts! (is-eq tx-sender (var-get contract-owner)) (err ERR-NOT-OWNER))
-    (var-set contract-owner new-owner)
-    (ok true)))
-
-;; =====================
-;; Trait implementation
-;; =====================
-(define-read-only (is-trusted (verifier principal))
-  (ok (is-trusted-verifier verifier)))
-
-(define-public (verify (user principal) (skill (string-ascii 64)) (evidence (optional (string-ascii 64))) (verifier principal))
-  (begin
-    (asserts! (is-trusted-verifier tx-sender) (err ERR-NOT-TRUSTED))
-    (asserts! (> (len skill) u0) (err ERR-INVALID-INPUT))
-    (index-skill-if-new user skill)
-    (map-set skills { user: user, skill: skill }
-      { verified: true, verifier: tx-sender, evidence: evidence, timestamp: block-height })
-    (emit "SkillVerified" (as-max-len? (concat skill " verified") u200))
-    (ok true)))
+;; Counter variables
+(define-data-var next-skill-id uint u1)
+(define-data-var next-category-id uint u1)
+(define-data-var total-users uint u0)
+(define-data-var total-verifications uint u0)
