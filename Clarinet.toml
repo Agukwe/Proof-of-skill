@@ -1,22 +1,12 @@
 [project]
 name = "proof-of-skill"
-authors = []
-description = ""
-telemetry = true
 requirements = []
 [contracts.proof-of-skill]
 path = "contracts/proof-of-skill.clar"
-depends_on = []
+clarity_version = 2
+epoch = 2.5
 
-[repl]
-costs_version = 2
-parser_version = 2
-
-[repl.analysis]
-passes = ["check_checker"]
-
-[repl.analysis.check_checker]
-strict = false
-trusted_sender = false
-trusted_caller = false
-callee_filter = false
+[contracts.skill-verifier-trait]
+path = "contracts/traits/skill-verifier-trait.clar"
+clarity_version = 2
+epoch = 2.5
